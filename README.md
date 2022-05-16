@@ -7,3 +7,5 @@ A simple attempt at implementing the qoi encoder and decoder in V. This is an al
 - Write tests
 - Rewrite error messages
 - Separate repeated code into functions (if necessary)
+- Create benchmarker
+- Implement streaming encoders and decoders

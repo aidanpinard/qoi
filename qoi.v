@@ -30,6 +30,7 @@ fn qoi_color_hash(pixel RGBA) int {
 
 // Encode rgb or rgba bytes to qoi. Length of raw_pixels must be height * width * channels.
 // Colorspace is either 0 = sRGB with linear alpha or 1 = all channels linear from qoi spec.
+// Needs optimization, currently slow af in comparison to reference. around 1.2x - 1.5x encode time for stbi png
 pub fn encode(raw_pixels []u8, width u32, height u32, channels u8, colorspace u8) ?[]u8 {
 	if height * width >= qoi.qoi_pixels_max {
 		error('Image has too many pixels to safely process.')
@@ -56,7 +57,8 @@ pub fn encode(raw_pixels []u8, width u32, height u32, channels u8, colorspace u8
 	}
 	pixels := arrays.chunk(raw_pixels, channels).map(rgba_mapper)
 
-	mut bytes := qoi.magic_bytes.clone()
+	mut bytes := []u8{cap: int(height * width * colorspace * 3 / 4 + 14 + 8)}
+	bytes << qoi.magic_bytes
 
 	// Add width as 4 bytes
 	for i in 0 .. 4 {
@@ -135,6 +137,7 @@ pub fn encode(raw_pixels []u8, width u32, height u32, channels u8, colorspace u8
 
 // Decode the raw bytes from a qoi file into raw rgb/rgba pixels.
 // Return values are pixels, width, height, channels, colorspace.
+// TODO: FIX THIS. THIS IS BUSTED.
 pub fn decode(raw_bytes []u8) ?([]u8, u32, u32, u8, u8) {
 	// QOI error checking
 	if raw_bytes.len < qoi.qoi_header_size + qoi.qoi_end_markers.len {
@@ -234,7 +237,6 @@ pub fn decode(raw_bytes []u8) ?([]u8, u32, u32, u8, u8) {
 		if channels == 4 {
 			pixels << pixel.a
 		}
-		println('Len: $pixels.len\tCap: $pixels.cap')
 	}
 
 	return pixels, width, height, channels, colorspace

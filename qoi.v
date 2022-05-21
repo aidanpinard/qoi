@@ -28,8 +28,10 @@ fn qoi_color_hash(pixel RGBA) int {
 	return (pixel.r * 3 + pixel.g * 5 + pixel.b * 7 + pixel.a * 11) % 64
 }
 
-pub fn qoi_encode(raw_pixels []u8, width u32, height u32, channels u8, colorspace u8) ?[]u8 {
-	if height * width >= qoi_pixels_max {
+// Encode rgb or rgba bytes to qoi. Length of raw_pixels must be height * width * channels.
+// Colorspace is either 0 = sRGB with linear alpha or 1 = all channels linear from qoi spec.
+pub fn encode(raw_pixels []u8, width u32, height u32, channels u8, colorspace u8) ?[]u8 {
+	if height * width >= qoi.qoi_pixels_max {
 		error('Image has too many pixels to safely process.')
 	}
 	if height * width * colorspace != raw_pixels.len {
@@ -54,7 +56,7 @@ pub fn qoi_encode(raw_pixels []u8, width u32, height u32, channels u8, colorspac
 	}
 	pixels := arrays.chunk(raw_pixels, channels).map(rgba_mapper)
 
-	mut bytes := magic_bytes.clone()
+	mut bytes := qoi.magic_bytes.clone()
 
 	// Add width as 4 bytes
 	for i in 0 .. 4 {
@@ -80,21 +82,21 @@ pub fn qoi_encode(raw_pixels []u8, width u32, height u32, channels u8, colorspac
 		if pixel == last_pixel {
 			run++
 			if run == 62 || i == pixels.len {
-				bytes << qoi_op_run_tag | run - 1
+				bytes << qoi.qoi_op_run_tag | run - 1
 				run = 0
 			}
 		} else {
 			if run > 0 {
-				bytes << qoi_op_run_tag | run - 1
+				bytes << qoi.qoi_op_run_tag | run - 1
 				run = 0
 			}
 
 			index_pos := qoi_color_hash(pixel)
 
 			if index[index_pos] == pixel {
-				bytes << qoi_op_index_tag | u8(index_pos)
+				bytes << qoi.qoi_op_index_tag | u8(index_pos)
 			} else if pixel.a != last_pixel.a {
-				bytes << qoi_op_rgba_tag
+				bytes << qoi.qoi_op_rgba_tag
 				bytes << pixel.r
 				bytes << pixel.g
 				bytes << pixel.b
@@ -108,12 +110,12 @@ pub fn qoi_encode(raw_pixels []u8, width u32, height u32, channels u8, colorspac
 				vg_b := vb - vg
 
 				if vr > -3 && vr < 2 && vg > -3 && vg < 2 && vb > -3 && vb < 2 {
-					bytes << qoi_op_diff_tag | u8((vr + 2) << 4) | u8((vg + 2) << 2) | u8(vb + 2)
+					bytes << qoi.qoi_op_diff_tag | u8((vr + 2) << 4) | u8((vg + 2) << 2) | u8(vb + 2)
 				} else if vg_r > -9 && vg_r < 8 && vg > -33 && vg < 32 && vg_b > -9 && vg_b < 8 {
-					bytes << qoi_op_luma_tag | u8(vg + 32)
+					bytes << qoi.qoi_op_luma_tag | u8(vg + 32)
 					bytes << u8((vg_r + 8) << 4) | u8((vg_b + 8))
 				} else {
-					bytes << qoi_op_rgb_tag
+					bytes << qoi.qoi_op_rgb_tag
 					bytes << pixel.r
 					bytes << pixel.g
 					bytes << pixel.b
@@ -124,21 +126,24 @@ pub fn qoi_encode(raw_pixels []u8, width u32, height u32, channels u8, colorspac
 		last_pixel = pixel
 	}
 
-	for i in qoi_end_markers {
+	for i in qoi.qoi_end_markers {
 		bytes << i
 	}
 
 	return bytes
 }
 
-pub fn qoi_decode(raw_bytes []u8) ?([]u8, u32, u32, u8, u8) {
+// Decode the raw bytes from a qoi file into raw rgb/rgba pixels.
+// Return values are pixels, width, height, channels, colorspace.
+pub fn decode(raw_bytes []u8) ?([]u8, u32, u32, u8, u8) {
 	// QOI error checking
-	if raw_bytes.len < qoi_header_size + qoi_end_markers.len {
-		error('Not enough raw bytes to be a qoi image. A qoi image has at minimum ${qoi_header_size + qoi_end_markers.len} bytes.')
+	if raw_bytes.len < qoi.qoi_header_size + qoi.qoi_end_markers.len {
+		error('Not enough raw bytes to be a qoi image. A qoi image has at minimum ${
+			qoi.qoi_header_size + qoi.qoi_end_markers.len} bytes.')
 	}
 
-	if magic_bytes != raw_bytes[0..4] {
-		error('Not a qoi image. Expected magic bytes: ${magic_bytes}. Got: ${raw_bytes[0..4]}')
+	if qoi.magic_bytes != raw_bytes[0..4] {
+		error('Not a qoi image. Expected magic bytes: ${qoi.magic_bytes}. Got: ${raw_bytes[0..4]}')
 	}
 
 	read_u32_folder := fn (acc u32, elem u8) u32 {
@@ -160,12 +165,12 @@ pub fn qoi_decode(raw_bytes []u8) ?([]u8, u32, u32, u8, u8) {
 	if colorspace > 1 {
 		error('Invalid colorspace. Got $colorspace, expected 0 or 1.')
 	}
-	if width * height >= qoi_pixels_max {
+	if width * height >= qoi.qoi_pixels_max {
 		error('Invalid qoi image dimensions. Image dimensions are ${width}x${height}. This is more total pixels than 
-		the maximum number of pixels ($qoi_pixels_max pixels).')
+		the maximum number of pixels ($qoi.qoi_pixels_max pixels).')
 	}
 
-	qoi_pixels := raw_bytes[qoi_header_size..(raw_bytes.len - qoi_end_markers.len)]
+	qoi_pixels := raw_bytes[qoi.qoi_header_size..(raw_bytes.len - qoi.qoi_end_markers.len)]
 	mut pixels := []u8{cap: int(width * height * channels)}
 	mut index := [64]RGBA{}
 	mut pixel := RGBA{
@@ -183,14 +188,14 @@ pub fn qoi_decode(raw_bytes []u8) ?([]u8, u32, u32, u8, u8) {
 		} else if iter < qoi_pixels.len {
 			byte1 := qoi_pixels[iter]
 
-			if byte1 == qoi_op_rgb_tag {
+			if byte1 == qoi.qoi_op_rgb_tag {
 				pixel = RGBA{
 					r: qoi_pixels[iter]
 					g: qoi_pixels[iter + 1]
 					b: qoi_pixels[iter + 2]
 				}
 				iter += 3
-			} else if byte1 == qoi_op_rgba_tag {
+			} else if byte1 == qoi.qoi_op_rgba_tag {
 				pixel = RGBA{
 					r: qoi_pixels[iter]
 					g: qoi_pixels[iter + 1]
@@ -198,15 +203,15 @@ pub fn qoi_decode(raw_bytes []u8) ?([]u8, u32, u32, u8, u8) {
 					a: qoi_pixels[iter + 3]
 				}
 				iter += 4
-			} else if (byte1 & qoi_mask) == qoi_op_index_tag {
+			} else if (byte1 & qoi.qoi_mask) == qoi.qoi_op_index_tag {
 				pixel = index[byte1]
-			} else if (byte1 & qoi_mask) == qoi_op_diff_tag {
+			} else if (byte1 & qoi.qoi_mask) == qoi.qoi_op_diff_tag {
 				pixel = RGBA{
 					r: ((byte1 >> 4) & 0x03) - 2
 					g: ((byte1 >> 2) & 0x03) - 2
 					b: (byte1 & 0x03) - 2
 				}
-			} else if (byte1 & qoi_mask) == qoi_op_luma_tag {
+			} else if (byte1 & qoi.qoi_mask) == qoi.qoi_op_luma_tag {
 				byte2 := qoi_pixels[iter]
 				iter++
 				vg := (byte1 & 0x3f) - 32
@@ -216,7 +221,7 @@ pub fn qoi_decode(raw_bytes []u8) ?([]u8, u32, u32, u8, u8) {
 					g: pixel.g + vg
 					b: pixel.b + vg - 8 + (byte2 & 0x0f)
 				}
-			} else if (byte1 & qoi_mask) == qoi_op_run_tag {
+			} else if (byte1 & qoi.qoi_mask) == qoi.qoi_op_run_tag {
 				run = int(byte1 & 0x3f)
 			}
 

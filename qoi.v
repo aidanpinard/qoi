@@ -16,7 +16,7 @@ const (
 	mask_2         = u8(0b11_000000)
 	max_run_length = 62
 	header_size    = 14 // 4 + 4 + 4 + 1 + 1
-	end_markers    = '\0\0\0\0\0\0\0\1'.bytes() //[u8(0), u8(0), u8(0), u8(0), u8(0), u8(0), u8(0), u8(1)]
+	end_markers    = '\0\0\0\0\0\0\0\1'.bytes()
 	index_size     = 64
 )
 
@@ -155,7 +155,7 @@ pub fn decode(data []u8) ?([]u8, u32, u32, int, int) {
 	pixel[1] = 0
 	pixel[2] = 0
 	pixel[3] = 255
-	
+
 	// quick test with 100k bytes shows cap is slightly faster (1-3 ms) than len+init when
 	// writing (arr[i] = vs arr << ). maybe some checks for = slows down? for smaller files
 	// preallocating takes significantly longer than setting cap

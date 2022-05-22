@@ -9,3 +9,6 @@ A simple attempt at implementing the qoi encoder and decoder in V. This is an al
 - Separate repeated code into functions (if necessary)
 - Create benchmarker
 - Implement streaming encoders and decoders
+- Test different pixel data types (currently using `[4]byte`)
+- Add grayscale image support
+- Test direct array access to boost speed when reading from arrays (need to ensure bounds checking)

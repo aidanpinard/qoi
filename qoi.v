@@ -148,10 +148,14 @@ pub fn decode(data []u8) ?([]u8, u32, u32, int, int) {
 		eprintln('Missing end markers. Got ${data#[-8..]} The data may be incomplete, or the end markers may be invalid.')
 	}
 
-	mut index := [qoi.index_size][]u8{}
+	mut index := [qoi.index_size][4]u8{}
 	mut run := 0
-	mut pixel := [u8(0), u8(0), u8(0), u8(255)]
-
+	mut pixel := [4]u8{}
+	pixel[0] = 0
+	pixel[1] = 0
+	pixel[2] = 0
+	pixel[3] = 255
+	
 	// quick test with 100k bytes shows cap is slightly faster (1-3 ms) than len+init when
 	// writing (arr[i] = vs arr << ). maybe some checks for = slows down? for smaller files
 	// preallocating takes significantly longer than setting cap
@@ -170,11 +174,16 @@ pub fn decode(data []u8) ?([]u8, u32, u32, int, int) {
 
 			match byte1 {
 				qoi.op_rgb_tag {
-					pixel = [qoi_data[i + 1], qoi_data[i + 2], qoi_data[i + 3], pixel[3]]
+					pixel[0] = qoi_data[i + 1]
+					pixel[1] = qoi_data[i + 2]
+					pixel[2] = qoi_data[i + 3]
 					i += 3
 				}
 				qoi.op_rgba_tag {
-					pixel = qoi_data[i + 1..i + 4]
+					pixel[0] = qoi_data[i + 1]
+					pixel[1] = qoi_data[i + 2]
+					pixel[2] = qoi_data[i + 3]
+					pixel[3] = qoi_data[i + 4]
 					i += 4
 				}
 				else {
@@ -207,12 +216,13 @@ pub fn decode(data []u8) ?([]u8, u32, u32, int, int) {
 					}
 				}
 			}
-
 			index[qoi_color_hash(pixel[0], pixel[1], pixel[2], pixel[3])] = pixel
-
 			i += 1
 		}
-		pixels << pixel
+		pixels << pixel[0]
+		pixels << pixel[1]
+		pixels << pixel[2]
+		pixels << pixel[3]
 	}
 	return pixels, w, h, c, cs
 }

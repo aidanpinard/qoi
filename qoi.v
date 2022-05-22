@@ -2,242 +2,227 @@ module qoi
 
 import arrays
 
+// i am smol brain programmer, but [direct_array_access] may be useful, need to see how to do the bounds checking
+
 const (
-	magic_bytes      = [u8(0x71), u8(0x6f), u8(0x69), u8(0x66)]
-	qoi_pixels_max   = u32(400000000)
-	qoi_op_diff_tag  = u8(0x40)
-	qoi_op_luma_tag  = u8(0x80)
-	qoi_op_run_tag   = u8(0xC0)
-	qoi_op_index_tag = u8(0x00)
-	qoi_op_rgb_tag   = u8(0xFE)
-	qoi_op_rgba_tag  = u8(0xFF)
-	qoi_mask         = u8(0xC0)
-	qoi_header_size  = 14 // 4 + 4 + 4 + 1 + 1
-	qoi_end_markers  = [u8(0), u8(0), u8(0), u8(0), u8(0), u8(0), u8(0), u8(1)]
+	magic_bytes    = 'qoif'.bytes()
+	max_pixels     = u32(400000000)
+	op_diff_tag    = u8(0b01_000000)
+	op_luma_tag    = u8(0b10_000000)
+	op_run_tag     = u8(0b11_000000)
+	op_index_tag   = u8(0b00_000000)
+	op_rgb_tag     = u8(0b1111_1110)
+	op_rgba_tag    = u8(0b1111_1111)
+	mask_2         = u8(0b11_000000)
+	max_run_length = 62
+	header_size    = 14 // 4 + 4 + 4 + 1 + 1
+	end_markers    = '\0\0\0\0\0\0\0\1'.bytes()
+	index_size     = 64
 )
 
-struct RGBA {
-	r u8
-	g u8
-	b u8
-	a u8
+[inline]
+fn qoi_color_hash(r u8, g u8, b u8, a u8) int {
+	return (r * 3 + g * 5 + b * 7 + a * 11) % qoi.index_size
 }
 
 [inline]
-fn qoi_color_hash(pixel RGBA) int {
-	return (pixel.r * 3 + pixel.g * 5 + pixel.b * 7 + pixel.a * 11) % 64
+fn u32_to_bytes(num u32) []u8 {
+	return []u8{len: 4, init: u8(num >> (8 * (3 - it)))}
 }
 
-// Encode rgb or rgba bytes to qoi. Length of raw_pixels must be height * width * channels.
-// Colorspace is either 0 = sRGB with linear alpha or 1 = all channels linear from qoi spec.
-// Needs optimization, currently slow af in comparison to reference. around 1.2x - 1.5x encode time for stbi png
-pub fn encode(raw_pixels []u8, width u32, height u32, channels u8, colorspace u8) ?[]u8 {
-	if height * width >= qoi.qoi_pixels_max {
-		error('Image has too many pixels to safely process.')
-	}
-	if height * width * colorspace != raw_pixels.len {
-		error('Invalid image dimensions. Expected ${height * width * colorspace} bytes, got $raw_pixels bytes.')
-	}
-	if channels < 3 || channels > 4 {
-		error('Invalid number of channels. Expected 3 or 4, got ${channels}.')
-	}
-	if colorspace > 1 {
-		error('Invalid colorspace. Expected 0 (sRGB with linear alpha) or 1 (all channels linear). Got ${colorspace}.')
+[inline]
+fn bytes_to_u32(num []u8) ?u32 {
+	if num.len != 4 {
+		gt_or_lt := if num.len > 4 { 'greater' } else { 'less' }
+		error('Number of bytes in array is $gt_or_lt than 4. u32 is exactly 4 bytes long.')
 	}
 
-	// need to define separately to avoid segfault https://github.com/vlang/v/issues/14416
-	rgba_mapper := fn [channels] (pixel []u8) RGBA {
-		// create a new pixel, if RGBA, return exact, if RGB, set a to 255 (opaque)
-		return RGBA{
-			r: pixel[0]
-			g: pixel[1]
-			b: pixel[2]
-			a: if channels == 4 { pixel[3] } else { 255 }
-		}
-	}
-	pixels := arrays.chunk(raw_pixels, channels).map(rgba_mapper)
+	return u32(num[0]) << 24 | u32(num[1]) << 16 | u32(num[2]) << 8 | u32(num[3])
+}
 
-	mut bytes := []u8{cap: int(height * width * colorspace * 3 / 4 + 14 + 8)}
-	bytes << qoi.magic_bytes
-
-	// Add width as 4 bytes
-	for i in 0 .. 4 {
-		bytes << u8(width >> (8 * (3 - i)))
+pub fn encode(pixels []u8, width int | u32, height int | u32, nr_channels int | u8) ?[]u8 {
+	w := match width {
+		int { u32(width) }
+		u32 { width }
 	}
-	// Add height as 4 bytes
-	for i in 0 .. 4 {
-		bytes << u8(height >> (8 * (3 - i)))
+	h := match height {
+		int { u32(height) }
+		u32 { height }
 	}
-	bytes << u8(channels)
-	bytes << u8(colorspace)
-
-	mut index := [64]RGBA{init: 0}
-	mut run := u8(0)
-	mut last_pixel := RGBA{
-		r: 0
-		g: 0
-		b: 0
-		a: 255
+	c := match nr_channels {
+		int { u8(nr_channels) }
+		u8 { nr_channels }
 	}
 
-	for i, pixel in pixels {
+	if w * h > qoi.max_pixels {
+		error('Image is too large to safely encode in QOI format.')
+	}
+
+	mut qoi_image := qoi.magic_bytes.clone()
+	qoi_image << u32_to_bytes(w)
+	qoi_image << u32_to_bytes(h)
+	qoi_image << c
+	qoi_image << u8(0) // srgb with linear alpha
+
+	// TODO: Test with 64*4 size, use / and % to get values
+	// TODO: Test with 64 u32
+	mut index := [qoi.index_size][]u8{}
+	mut last_pixel := [u8(0), u8(0), u8(0), u8(255)]
+	mut run := 0
+
+	for i, pixel in arrays.chunk(pixels, int(c)) {
+		alpha := if pixel.len == 4 { pixel[3] } else { u8(255) }
 		if pixel == last_pixel {
 			run++
-			if run == 62 || i == pixels.len {
-				bytes << qoi.qoi_op_run_tag | run - 1
+			if run == qoi.max_run_length || i == pixels.len / c {
+				qoi_image << qoi.op_run_tag | u8(run - 1)
 				run = 0
 			}
 		} else {
 			if run > 0 {
-				bytes << qoi.qoi_op_run_tag | run - 1
+				qoi_image << qoi.op_run_tag | u8(run - 1)
 				run = 0
 			}
 
-			index_pos := qoi_color_hash(pixel)
-
-			if index[index_pos] == pixel {
-				bytes << qoi.qoi_op_index_tag | u8(index_pos)
-			} else if pixel.a != last_pixel.a {
-				bytes << qoi.qoi_op_rgba_tag
-				bytes << pixel.r
-				bytes << pixel.g
-				bytes << pixel.b
-				bytes << pixel.a
+			idx := qoi_color_hash(pixel[0], pixel[1], pixel[2], alpha)
+			if index[idx] == pixel {
+				qoi_image << qoi.op_index_tag | u8(idx)
+			} else if alpha != last_pixel[3] {
+				qoi_image << [qoi.op_rgba_tag, pixel[0], pixel[1], pixel[2], alpha]
 			} else {
-				vr := i8(pixel.r - last_pixel.r)
-				vg := i8(pixel.g - last_pixel.g)
-				vb := i8(pixel.b - last_pixel.b)
+				vr := i8(pixel[0] - last_pixel[0])
+				vg := i8(pixel[1] - last_pixel[1])
+				vb := i8(pixel[2] - last_pixel[2])
 
 				vg_r := vr - vg
 				vg_b := vb - vg
 
 				if vr > -3 && vr < 2 && vg > -3 && vg < 2 && vb > -3 && vb < 2 {
-					bytes << qoi.qoi_op_diff_tag | u8((vr + 2) << 4) | u8((vg + 2) << 2) | u8(vb + 2)
+					qoi_image << qoi.op_diff_tag | (u8(vr + 2) << 4) | (u8(vg + 2) << 2) | u8(vb + 2)
 				} else if vg_r > -9 && vg_r < 8 && vg > -33 && vg < 32 && vg_b > -9 && vg_b < 8 {
-					bytes << qoi.qoi_op_luma_tag | u8(vg + 32)
-					bytes << u8((vg_r + 8) << 4) | u8((vg_b + 8))
+					qoi_image << [qoi.op_luma_tag | u8(vg + 32), (u8(vg_r + 8) << 4) | u8(vg_b + 8)]
 				} else {
-					bytes << qoi.qoi_op_rgb_tag
-					bytes << pixel.r
-					bytes << pixel.g
-					bytes << pixel.b
+					qoi_image << [qoi.op_rgb_tag, pixel[0], pixel[1], pixel[2]]
 				}
 			}
 		}
 
-		last_pixel = pixel
+		last_pixel = [pixel[0], pixel[1], pixel[2], alpha]
 	}
 
-	for i in qoi.qoi_end_markers {
-		bytes << i
-	}
+	qoi_image << qoi.end_markers
 
-	return bytes
+	return qoi_image
 }
 
-// Decode the raw bytes from a qoi file into raw rgb/rgba pixels.
-// Return values are pixels, width, height, channels, colorspace.
-// TODO: FIX THIS. THIS IS BUSTED.
-pub fn decode(raw_bytes []u8) ?([]u8, u32, u32, u8, u8) {
-	// QOI error checking
-	if raw_bytes.len < qoi.qoi_header_size + qoi.qoi_end_markers.len {
-		error('Not enough raw bytes to be a qoi image. A qoi image has at minimum ${
-			qoi.qoi_header_size + qoi.qoi_end_markers.len} bytes.')
+pub fn decode(data []u8) ?([]u8, u32, u32, int, int) {
+	if data.len < qoi.header_size + qoi.end_markers.len {
+		error('Insufficient data. Bytes provided are less than the minimum number of bytes for a qoi file.')
 	}
 
-	if qoi.magic_bytes != raw_bytes[0..4] {
-		error('Not a qoi image. Expected magic bytes: ${qoi.magic_bytes}. Got: ${raw_bytes[0..4]}')
+	if data[0..4] != qoi.magic_bytes {
+		error('Missing qoi magic bytes. Got ${data[0..3].bytestr()} instead of ${qoi.magic_bytes.bytestr()}.')
 	}
 
-	read_u32_folder := fn (acc u32, elem u8) u32 {
-		return u32(acc << 8) | u32(elem)
+	w := bytes_to_u32(data[4..8]) or { panic('Unable to read 4 bytes for width from data.') }
+	h := bytes_to_u32(data[8..12]) or { panic('Unable to read 4 bytes for width from data.') }
+
+	if w == 0 || h == 0 || w * h >= qoi.max_pixels {
+		error('Image defines invalid size. Given ${w}x${h}.')
 	}
 
-	width := arrays.fold(raw_bytes[4..8], 0, read_u32_folder)
-	height := arrays.fold(raw_bytes[8..12], 0, read_u32_folder)
+	c := int(data[12])
 
-	channels := raw_bytes[12]
-	colorspace := raw_bytes[13]
-
-	if width == 0 || height == 0 {
-		error('Invalid qoi image dimensions. Image dimensions are ${width}x$height')
-	}
-	if channels < 3 || channels > 4 {
-		error('Invalid number of channels. Got $channels, expected 3 or 4.')
-	}
-	if colorspace > 1 {
-		error('Invalid colorspace. Got $colorspace, expected 0 or 1.')
-	}
-	if width * height >= qoi.qoi_pixels_max {
-		error('Invalid qoi image dimensions. Image dimensions are ${width}x${height}. This is more total pixels than 
-		the maximum number of pixels ($qoi.qoi_pixels_max pixels).')
+	if c !in [3, 4] {
+		error('Invalid no. of channels. QOI only supports RGB(3 channel) and RGBA (4 channel). Given $c instead.')
 	}
 
-	qoi_pixels := raw_bytes[qoi.qoi_header_size..(raw_bytes.len - qoi.qoi_end_markers.len)]
-	mut pixels := []u8{cap: int(width * height * channels)}
-	mut index := [64]RGBA{}
-	mut pixel := RGBA{
-		r: 0
-		g: 0
-		b: 0
-		a: 255
+	cs := int(data[13])
+	if cs !in [0, 1] {
+		error('Invalid colorspace. QOI only supports sRGB with linear alpha (0) and all channels linear (1). Given $cs instead.')
 	}
-	mut iter := 0
+
+	// data#[-8..] == starting from last - 8 to last
+	end_markers_exist := data#[-8..] == qoi.end_markers
+	if !end_markers_exist {
+		eprintln('Missing end markers. Got ${data#[-8..]} The data may be incomplete, or the end markers may be invalid.')
+	}
+
+	mut index := [qoi.index_size][4]u8{}
 	mut run := 0
+	mut pixel := [4]u8{}
+	pixel[0] = 0
+	pixel[1] = 0
+	pixel[2] = 0
+	pixel[3] = 255
 
-	for pixels.len < width * height * channels {
+	// quick test with 100k bytes shows cap is slightly faster (1-3 ms) than len+init when
+	// writing (arr[i] = vs arr << ). maybe some checks for = slows down? for smaller files
+	// preallocating takes significantly longer than setting cap
+	mut pixels := []u8{cap: int(w * h) * c}
+
+	// skip header & end markers if they exist
+	// slices are allocate on grow, so shouldn't have too much perf impact
+	qoi_data := if end_markers_exist { data#[..-8][14..] } else { data[14..] }
+
+	mut i := 0
+	for count := 0; count < int(w * h); count++ {
 		if run > 0 {
 			run--
-		} else if iter < qoi_pixels.len {
-			byte1 := qoi_pixels[iter]
+		} else if i < qoi_data.len {
+			byte1 := qoi_data[i]
 
-			if byte1 == qoi.qoi_op_rgb_tag {
-				pixel = RGBA{
-					r: qoi_pixels[iter]
-					g: qoi_pixels[iter + 1]
-					b: qoi_pixels[iter + 2]
+			match byte1 {
+				qoi.op_rgb_tag {
+					pixel[0] = qoi_data[i + 1]
+					pixel[1] = qoi_data[i + 2]
+					pixel[2] = qoi_data[i + 3]
+					i += 3
 				}
-				iter += 3
-			} else if byte1 == qoi.qoi_op_rgba_tag {
-				pixel = RGBA{
-					r: qoi_pixels[iter]
-					g: qoi_pixels[iter + 1]
-					b: qoi_pixels[iter + 2]
-					a: qoi_pixels[iter + 3]
+				qoi.op_rgba_tag {
+					pixel[0] = qoi_data[i + 1]
+					pixel[1] = qoi_data[i + 2]
+					pixel[2] = qoi_data[i + 3]
+					pixel[3] = qoi_data[i + 4]
+					i += 4
 				}
-				iter += 4
-			} else if (byte1 & qoi.qoi_mask) == qoi.qoi_op_index_tag {
-				pixel = index[byte1]
-			} else if (byte1 & qoi.qoi_mask) == qoi.qoi_op_diff_tag {
-				pixel = RGBA{
-					r: ((byte1 >> 4) & 0x03) - 2
-					g: ((byte1 >> 2) & 0x03) - 2
-					b: (byte1 & 0x03) - 2
-				}
-			} else if (byte1 & qoi.qoi_mask) == qoi.qoi_op_luma_tag {
-				byte2 := qoi_pixels[iter]
-				iter++
-				vg := (byte1 & 0x3f) - 32
+				else {
+					match byte1 & qoi.mask_2 {
+						qoi.op_index_tag {
+							pixel = index[byte1]
+						}
+						qoi.op_diff_tag {
+							pixel[0] += ((byte1 >> 4) & 0x03) - 2
+							pixel[1] += ((byte1 >> 2) & 0x03) - 2
+							pixel[2] += (byte1 & 0x03) - 2
+						}
+						qoi.op_luma_tag {
+							byte2 := qoi_data[i + 1]
 
-				pixel = RGBA{
-					r: pixel.r + vg - 8 + ((byte2 >> 4) & 0x0f)
-					g: pixel.g + vg
-					b: pixel.b + vg - 8 + (byte2 & 0x0f)
+							vg := (byte1 & ~qoi.mask_2) - 32
+
+							pixel[0] += vg - 8 + ((byte2 >> 4) & 0x0f)
+							pixel[1] += vg
+							pixel[2] += vg - 8 + (byte2 & 0x0f)
+
+							i += 1
+						}
+						qoi.op_run_tag {
+							run = int(byte1 & ~qoi.mask_2)
+						}
+						else {
+							panic('Reached ${@LINE} of ${@FN} in ${@MOD}. This should not be possible.') // impossible point
+						}
+					}
 				}
-			} else if (byte1 & qoi.qoi_mask) == qoi.qoi_op_run_tag {
-				run = int(byte1 & 0x3f)
 			}
-
-			index[qoi_color_hash(pixel)] = pixel
+			index[qoi_color_hash(pixel[0], pixel[1], pixel[2], pixel[3])] = pixel
+			i += 1
 		}
-
-		pixels << pixel.r
-		pixels << pixel.g
-		pixels << pixel.b
-		if channels == 4 {
-			pixels << pixel.a
-		}
+		pixels << pixel[0]
+		pixels << pixel[1]
+		pixels << pixel[2]
+		pixels << pixel[3]
 	}
-
-	return pixels, width, height, channels, colorspace
+	return pixels, w, h, c, cs
 }

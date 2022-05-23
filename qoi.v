@@ -31,12 +31,7 @@ fn u32_to_bytes(num u32) []u8 {
 }
 
 [inline]
-fn bytes_to_u32(num []u8) ?u32 {
-	if num.len != 4 {
-		gt_or_lt := if num.len > 4 { 'greater' } else { 'less' }
-		error('Number of bytes in array is $gt_or_lt than 4. u32 is exactly 4 bytes long.')
-	}
-
+fn bytes_to_u32(num []u8) u32 {
 	return u32(num[0]) << 24 | u32(num[1]) << 16 | u32(num[2]) << 8 | u32(num[3])
 }
 
@@ -124,8 +119,8 @@ pub fn decode(data []u8) ?([]u8, u32, u32, int, int) {
 		error('Missing qoi magic bytes. Got ${data[0..3].bytestr()} instead of ${qoi.magic_bytes.bytestr()}.')
 	}
 
-	w := bytes_to_u32(data[4..8]) or { panic('Unable to read 4 bytes for width from data.') }
-	h := bytes_to_u32(data[8..12]) or { panic('Unable to read 4 bytes for width from data.') }
+	w := bytes_to_u32(data[4..8])
+	h := bytes_to_u32(data[8..12])
 
 	if w == 0 || h == 0 || w * h >= qoi.max_pixels {
 		error('Image defines invalid size. Given ${w}x${h}.')
